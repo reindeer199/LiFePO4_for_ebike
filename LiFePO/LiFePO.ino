@@ -58,7 +58,12 @@
 #define PACK_VOLTAGE             0x5A   // mV
 #define AVERAGE_VOLTAGE          0x5D   // mV
 
-// *** Variables ***
+// feste Pulsweite von 4µs vorgeben:
+#define PULSWITH_4MICROS ((4 * F_CPU) / (8 * 1000000))
+#if (PULSWITH_4MICROS < 2)
+#error "PULSWITH"
+#endif
+
 // Operating System
 uint32_t receiveTimeStmp;
 enum T_states {
@@ -84,7 +89,7 @@ T_charge stateCharge;
 uint8_t cycle; // NoOfAquisitionCycles ADCvalues are collected and an average value is generated
 // Raw values
 volatile uint16_t Current_In_Raw,Current_Out_Raw,Voltage36_Raw,VoltageINT_Raw,Current_In_Rawtemp,Current_Out_Rawtemp;
-volatile uint16_t Voltage21_Raw,Voltage22_Raw,Voltage24_Raw;
+volatile uint16_t Voltage21_Raw,Voltage22_Raw,Voltage24_Raw,VoltageINT_temp;
 // Min/Max values
 /* battery empty */
 #define MIN_VOLTAGE		31000
@@ -149,6 +154,7 @@ uint8_t ctr_Nachlauf_NoCurrent;
 void ReadAllADCValues(void);
 void CalcPhysicalValues(void);
 void SetOutputs_1000ms (void);
+void Adjust_DutyCycle (void);
 
 uint16_t ADCwhileSlp(uint8_t);
 int16_t ScalePhysicalS(uint16_t adc_value, uint16_t factor, uint16_t offset);
@@ -260,9 +266,10 @@ void onRequest(){
 
 void onReceive(int len){
   uint8_t i=0;
+  
   // monitor I2C high
-  //pinMode (MON_I2C, OUTPUT);
-  //digitalWrite (MON_I2C, HIGH);
+  pinMode (MON_I2C, OUTPUT);
+  digitalWrite (MON_I2C, HIGH);
 
   while(Wire.available()){
     data[i] = Wire.read();
@@ -272,8 +279,8 @@ void onReceive(int len){
   }
   command = data[0];
   // monitor I2C low
-  //digitalWrite (MON_I2C, LOW);
-  //pinMode (MON_I2C, INPUT);
+  digitalWrite (MON_I2C, LOW);
+  pinMode (MON_I2C, INPUT);
 }
 
 // ADC complete ISR
@@ -310,14 +317,6 @@ ISR(TIMER2_OVF_vect)
   //digitalWrite (MON_I2C, HIGH);
   //pinMode (MON_I2C, OUTPUT);
 }
-
-#if 0
-void pwmWakeup()
-{
-  digitalWrite (MON_I2C, LOW);
-  pinMode (MON_I2C, OUTPUT);
-}
-#endif
 #endif
 
 void setup() {
@@ -364,11 +363,6 @@ void setup() {
   //   ich maximal 0.25µs * 256 = 64µs -> mit Prescaler 8: 2µs * 256 = 512µs
   TCCR2A = bit (WGM20) | bit (WGM21) | bit (COM2B1); // fast PWM, clear OC2B on compare, set at bottom, OC2A disconnected (will be used with SPI)
   TCCR2B = bit (WGM22) | bit (CS21);         // fast PWM top=OCR2A, prescaler of 8 (mit prescaler 1 komme ich nicht tief genug)
-  // feste Pulsweite von 4µs vorgeben:
-  #define PULSWITH_4MICROS ((4 * F_CPU) / (8 * 1000000))
-  #if (PULSWITH_4MICROS < 2)
-  #error "PULSWITH"
-  #endif
   OCR2B = (uint8_t)PULSWITH_4MICROS - 1;
   // starte mit 50% duty, also Periode 8µs
   OCR2A = (2 * PULSWITH_4MICROS) - 1;
@@ -392,6 +386,8 @@ void setup() {
   //start time counter
   ctr_Nachlauf_NoCurrent = 0;
   flag_print_measurement = false;
+  // start up in discharging mode (before interrupt enabled)
+  BatteryStatus = BATT_STAT_DISCHARGING;
 
   // Interrupt routinen anmelden
   Wire.onReceive(onReceive);
@@ -414,8 +410,6 @@ void setup() {
   Voltage36_Raw = 0;
 
   Capacity_Low = 0;
-  // start up in discharging mode
-  BatteryStatus = BATT_STAT_DISCHARGING;
 
   // initialize EEPROM values
   if (myEEP_hdl.EepRead(EEPADR_CAPACITY, &Capacity))
@@ -439,6 +433,12 @@ void setup() {
   Serial.print(F("Capacity: "));
   Serial.println(Capacity);
 
+  // Disable pullups of I2C pins because there is an external pullup
+  // reduces current consuption when one of this pins goes low
+  // switching regulator can be adjusted lower then
+  digitalWrite (SCL, LOW);
+  digitalWrite (SDA, LOW);
+
   // for measuring execution time
   digitalWrite (MON_ADC, LOW);
   // write first timestamp
@@ -449,8 +449,6 @@ void setup() {
 #if PWM_INT
     pinMode(PWM_INT, INPUT);
     digitalWrite(PWM_INT, HIGH); 
-    // attachInterrupt(digitalPinToInterrupt(PWM_INT), pwmWakeup, FALLING); 
-//    attachInterrupt(0, pwmWakeup, FALLING); 
 #endif
   // start watchdog in interrupt mode
   wdt_ienable(WTO_256MS);
@@ -483,8 +481,6 @@ void loop() {
         StateMachine();
         // set flag to send measured values on the serial port
         flag_print_measurement = true;
-        //
-        SetOutputs_1000ms();
 
         cycle = 0; // prepare for next cycle
         break;
@@ -495,12 +491,12 @@ void loop() {
         if (flag_print_measurement == true)
         {
           //Show values on the USB interface for debugging
+          Serial << endl;
           Serial << Current_In << F(",") << Current_Out << F(",") << Capacity << F(",");
           Serial << Voltage36 << F(",") << VoltageINT << F(",");
           Serial << lowByte(BatteryStatus) << F(",") << (BL03state * 10 + stateCharge) << F(",");
-          Serial << Current_In_Rawtemp << F(",") << Current_Out_Rawtemp << F(",") << ((int32_t)OFFSET_CURRENT_OUT2 * Current_In)<< F(","); // temporary
-          Serial << OCR2A << F(",") << OCR2B << F(",");
-          Serial << endl;
+//          Serial << Current_In_Rawtemp << F(",") << Current_Out_Rawtemp << F(",") << ((int32_t)OFFSET_CURRENT_OUT2 * Current_In)<< F(","); // temporary
+          Serial << OCR2A << F(",") /*<< OCR2B << F(",")*/;
           Serial.flush();
           flag_print_measurement = false;
         }
@@ -534,6 +530,12 @@ void loop() {
         cycle = 0; // prepare for next cycle
         break;
   	}
+  }
+  else
+  {
+    /* Background tasks */
+    /* adjust duty cycle faster than 1 times per second */
+    Adjust_DutyCycle();
   }
   // *********************
   // *** Prepare Sleep ***
@@ -698,6 +700,7 @@ void StateMachine(void)
 {
   switch(BL03state)
   {
+    default:
     case ST_NEW:
       // after first data calculated
       // set state to initialized
@@ -708,22 +711,16 @@ void StateMachine(void)
       // set INIT bit
       BatteryStatus |= BATT_STAT_INIT;
       stateCharge = SC_INIT;
-      
-      if (Current > 20)
-      {
-        BL03state = ST_CHARGE;
-        stateCharge = SC_CHARGE;
-      }
-      else //if (Current < -10)
-      {
-        BL03state = ST_DISCHARGE;
-      }
+      ctr_Nachlauf_NoCurrent = 0;
+      BL03state = ST_NACHLAUF;
       break;
 
     case ST_CHARGE:
-      if (Current < -10)
+      if (Current < 0)
       {
-        BL03state = ST_DISCHARGE;
+        BL03state = ST_NACHLAUF;
+        // set discharging bit
+        BatteryStatus |= BATT_STAT_DISCHARGING;
         // deactivate BMS charging aborted
         digitalWrite (BMS_OUT, LOW);
         stateCharge = SC_INIT;
@@ -754,10 +751,10 @@ void StateMachine(void)
               stateCharge = SC_FULL;
               // all modules filled?
               if( Voltage36>40400)
-                 {
-                   // set capacity to max
-                   Capacity = MAX_CAPACITY;
-                 }
+              {
+                // set capacity to max
+                Capacity = MAX_CAPACITY;
+              }
             }
             break;
           case SC_FULL:
@@ -770,9 +767,9 @@ void StateMachine(void)
       break;
 
     case ST_DISCHARGE:
-      if (Current > 30)
+      if (Current > -20)
       {
-        BL03state = ST_CHARGE;
+        BL03state = ST_NACHLAUF;
       }
       else
       {
@@ -782,76 +779,66 @@ void StateMachine(void)
       break;
 
     case ST_NACHLAUF:
-      break;
-    case ST_SHUTDOWN:
-      break;
-    default:
-      break;
-  }
-
-  // Nachlauf
-  // checks if ebike is on,
-  if (Current < -30)
-  {
-    ctr_Nachlauf_NoCurrent = 0;
-  }
-  // or battery is charging?
-  else if (Current > 20)
-  {
-    ctr_Nachlauf_NoCurrent = 0;
-  }
-  // after 60 seconds inactivity -> shutdown
-  else if(ctr_Nachlauf_NoCurrent >= 120)
-  {
-    // do only once
-    if(BL03state != ST_SHUTDOWN)
-    {
-      // Shutdown
-      BL03state = ST_SHUTDOWN;
-
-      // limit to max. value
-      if(Capacity > MAX_CAPACITY)
+      // Nachlauf
+      // checks if ebike is on,
+      if (Current < -30)
       {
-        Capacity = MAX_CAPACITY;
+    	BL03state = ST_DISCHARGE;
+    	ctr_Nachlauf_NoCurrent = 0;
       }
-
-      // copy data to write into buffer
-      //EEP.bufE2pWr_CV[0] = Capacity;
-      //EEP.bufE2pWr_CV[1] = Capacity>>8;
-      // Save values in EEPROM
-      myEEP_hdl.EepWrite(EEPADR_CAPACITY, &Capacity, 3);
+      // or battery is charging?
+      else if (Current > 20)
+      {
+    	BL03state = ST_CHARGE;
+     	ctr_Nachlauf_NoCurrent = 0;
+      }
+      // after inactivity > Nachlauf_time : shutdown
+      else if(ctr_Nachlauf_NoCurrent >= 120)
+      {
+        // limit to max. value
+        if(Capacity > MAX_CAPACITY)
+        {
+          Capacity = MAX_CAPACITY;
+        }
+        // Save values in EEPROM
+        myEEP_hdl.EepWrite(EEPADR_CAPACITY, &Capacity, 3);
         // message for debugging
-      Serial << F("shutdown: ") << ctr_Nachlauf_NoCurrent;
-      delay(1);
+        Serial << F("shutdown: ") << ctr_Nachlauf_NoCurrent;
+        delay(1);
+   	    // Shutdown
+   	    BL03state = ST_SHUTDOWN;
+      }
+      // inactive
+      else
+      {
+        // if not in testbench
+        if(Voltage36 > 20000)
+        {
+          // neither ebike on nor charging - increase timeout counter
+          ctr_Nachlauf_NoCurrent++;
+        }
+        else // in testbench
+        {
+          // no timeout
+          ctr_Nachlauf_NoCurrent = 0;
+        }
+      }
+      break;
 
-        // Spannungsversorgung ausschalten
-        TCCR2A = bit (WGM20) | bit (WGM21); // fast PWM, Normal Port Operation
-        // switch off power supply
-        digitalWrite (PWM_OUT, LOW);
-    }
-  }
-  // inactive 
-  else
-  {
-    // if not in testbench
-    if(Voltage36 > 20000)
-    {
-      // neither ebike on nor charging - increase timeout counter
-      ctr_Nachlauf_NoCurrent++;
-    }
-    else
-    {
-      // in testbench
-      ctr_Nachlauf_NoCurrent = 0;
-    }
+    case ST_SHUTDOWN:
+      // Spannungsversorgung ausschalten
+      TCCR2A = bit (WGM20) | bit (WGM21); // fast PWM, Normal Port Operation
+      // switch off power supply
+      digitalWrite (PWM_OUT, LOW);
+      break;
   }
 }
 
 void SetOutputs_1000ms (void)
 {
 	// adjust PWM duty cycle for switched power supply
-	// if internal voltage < 7V
-	if(VoltageINT < 7500)
+	// if internal voltage < 8,5V
+	if(VoltageINT < 8500)
 	{
 #if (HW_version == 1) // PWM
 		// is cycle time longer than pulse time+1
@@ -874,15 +861,16 @@ void SetOutputs_1000ms (void)
     {
       OCR2A--;    // decrease period
       // Risk of undervoltage?
-      if(VoltageINT < 6000)
+      if(VoltageINT < 8000)
       {
         OCR2A--;    // decrease more
       }
    }
 #endif
 	}
-	// if internal voltage > 7V
-	if(VoltageINT > 7500)
+	// if internal voltage > 8,7V then proceed with decreasing voltage
+  // (with lower limits internal voltage can drop too much!!!)
+	if(VoltageINT > 8700)
 	{
 #if (HW_version == 1) // PWM
 		// is cycle time shorter than maximum
@@ -903,8 +891,11 @@ void SetOutputs_1000ms (void)
     }
 #endif
 #if (HW_version == 21) //  PWM pulse with fix, increase period
+
+#if 1
 //Calculate Step
 uint8_t Loc_Step;
+      Loc_Step = 1;    // increase period
       if(VoltageINT > 30000) // if >30V
       {
         Loc_Step = 16; // increase more
@@ -917,22 +908,64 @@ uint8_t Loc_Step;
       {
         Loc_Step = 4; // increase more
       }
-      else if(VoltageINT > 10000) // if >10V
+      else if(VoltageINT > 12500) // if >12,5V
       {
         Loc_Step = 2; // increase more
       }
-      else
-      {
-        Loc_Step =1;    // increase period
-      }
     // max period not reached?
-    if(OCR2A < (255-Loc_Step))
+    if(OCR2A < (254-Loc_Step))
     {
       OCR2A += Loc_Step;
     }
+#else
+    if(OCR2A < 254)
+    {
+      OCR2A++;
+    }
+#endif    
 #endif
 	}
 
+}
+
+/* Adjusts Duty Cycle of switching regulator for internal voltage */
+/* this is done by modifieing the period, ON time is kept constant */
+/* if voltage is above specified level then period is increased */
+/* else period is decreased */
+void Adjust_DutyCycle (void)
+{
+#if (HW_version == 21) // this is only for HW 21
+
+  adcReading = analogRead(V_INT);
+  VoltageINT_temp = ScalePhysicalU(adcReading*NoOfAquisitionCycles, FAKTOR_VOLTAGE_INT, 0);
+  // adjust PWM duty cycle for switched power supply
+  // if internal voltage < 8,6V
+  if(VoltageINT_temp < 8600)
+  {
+    // min. period not reached?
+    if(OCR2A > ((2*OCR2B)+1) )
+    {
+      OCR2A--;    // decrease period
+      Serial << F("-"); /* monitor show that period decreased */
+      // Risk of undervoltage?
+      if(VoltageINT < 8000)
+      {
+        OCR2A--;    // decrease more
+        Serial << F("="); /* monitor show that period decreased double */
+      }
+    }
+  }
+  // if internal voltage > 8,8V then proceed with decreasing voltage
+  // (with lower limits internal voltage can drop too much!!!)
+  if(VoltageINT_temp > 8800)
+  {
+    if(OCR2A < 254)
+    {
+      OCR2A++;
+      Serial << F("+"); /* monitor show that period increased */
+    }
+  }
+#endif
 }
 
 /* $Log: LiFePO2_1.ino $
