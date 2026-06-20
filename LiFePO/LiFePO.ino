@@ -380,7 +380,7 @@ void setup() {
 #endif
 
 	//  Startmeldung ausgeben
-	Serial.begin(19200);
+	Serial.begin(19200,SERIAL_8N2); /* 2 stop bits um ungenauigkeiten der baudrate auszugleichen */
 	Serial << F("BL03Ersatz V") << HW_version;
 	Serial << __DATE__ << F(" ") << __TIME__ << OCR2A << OCR2B << endl;
 
@@ -425,6 +425,8 @@ void setup() {
       // if unplausible set to 90%
       Capacity = MAX_CAPACITY / 100 * 90;
     }
+    /* assume lower value (-1) to avoid reset of km counter in the bike */
+    Capacity--;
     
   }
   else
@@ -494,6 +496,15 @@ void loop() {
         flag_print_measurement = true;
 
         cycle = 0; // prepare for next cycle
+        if(BL03state!=ST_IDLE)
+        {
+          /* wenn nicht IDLE, die LED gleich wieder ausschalten */
+          digitalWrite (LED_RED, LOW);
+        }
+        else
+        {
+          /* die LED anlassen bis zum nächsten WD interrupt -> blinken zeigt IDLE an */
+        }
         break;
       /*********************/
       case 1:
@@ -509,6 +520,8 @@ void loop() {
           //Serial.flush();// /* wait until all is sent out */ dann wird aber die PWM längere Zeit nicht geregelt -> Spannungseinbrüche
           flag_print_measurement = false;
         }
+        /* die LED gleich wieder ausschalten */
+        digitalWrite (LED_RED, LOW);
         break;
       case 2:
 		    if (flag_print_commI2C != PRINT_NOTHING)
@@ -531,6 +544,15 @@ void loop() {
           //Serial.flush();// /* wait until all is sent out */ dann wird aber die PWM längere Zeit nicht geregelt -> Spannungseinbrüche
 		    	flag_print_commI2C = PRINT_NOTHING;
 		    }
+        if(BL03state!=ST_IDLE)
+        {
+          /* wenn nicht IDLE, die LED gleich wieder ausschalten */
+          digitalWrite (LED_RED, LOW);
+        }
+        else
+        {
+          /* die LED anlassen bis zum nächsten WD interrupt -> blinken zeigt IDLE an */
+        }
         break;
       case 3:
         //
@@ -538,14 +560,14 @@ void loop() {
     	  // PWM pulse with adjust
           SetOutputs_1000ms();
         #endif
+        /* die LED gleich wieder ausschalten */
+        digitalWrite (LED_RED, LOW);
         break;
       default:
         cycle = 0; // prepare for next cycle
         break;
   	}
 	  OCR2A++;    // increase period will decrease VINT a little bit
-    pinMode (LED_RED, OUTPUT);
-    digitalWrite (LED_RED, LOW);
   }
   else
   {
